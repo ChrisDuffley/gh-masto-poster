@@ -7,6 +7,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 
 import httpx
 
@@ -15,13 +16,13 @@ from gh_masto_poster.github.api import GitHubAPI
 from gh_masto_poster.github.events import merge_and_filter
 from gh_masto_poster.github.feeds import fetch_feed_events
 from gh_masto_poster.mastodon.poster import MastodonPoster
-from gh_masto_poster.models import RepoInfo
+from gh_masto_poster.models import Event, RepoInfo
 from gh_masto_poster.state import State
 from gh_masto_poster.templates import TemplateRenderer
 
 log = logging.getLogger("gh_masto_poster")
 
-# How many poll cycles between repo-list refreshes
+# How many API poll cycles between repo-list refreshes
 _REPO_REFRESH_INTERVAL = 50
 
 # Throttle delay between Mastodon posts (seconds)
@@ -29,7 +30,7 @@ _POST_THROTTLE = 10
 
 
 async def run(config: AppConfig) -> None:
-    """Main async loop: poll → merge → render → post → sleep."""
+    """Main async loop with independent timers for feeds, API, and notifications."""
     state = State(config.daemon.state_file)
     gh_api = GitHubAPI(config.github.token)
     masto = MastodonPoster(
@@ -57,25 +58,90 @@ async def run(config: AppConfig) -> None:
         )
 
         repos: list[RepoInfo] = []
-        poll_count = 0
+        api_poll_count = 0
 
-        log.info("Starting gh-masto-poster daemon (poll every %ds)", config.daemon.poll_interval)
+        # Track when each source was last polled
+        last_feed_poll = 0.0
+        last_api_poll = 0.0
+        last_notif_poll = 0.0
+
+        log.info(
+            "Starting gh-masto-poster daemon (feeds: %.0fs, API: %.0fs, notifications: %.0fs)",
+            config.daemon.feed_interval,
+            config.daemon.api_interval,
+            config.daemon.notification_interval,
+        )
 
         while not shutdown.is_set():
             try:
+                now = time.monotonic()
+
                 # Refresh repo list periodically
-                if not repos or poll_count % _REPO_REFRESH_INTERVAL == 0:
+                if not repos or api_poll_count % _REPO_REFRESH_INTERVAL == 0:
                     repos = await _discover_repos(client, gh_api, config)
 
-                poll_count += 1
-                await _poll_cycle(client, config, gh_api, masto, renderer, state, repos)
+                feed_events: list[Event] = []
+                api_events: list[Event] = []
+                notif_events: list[Event] = []
+
+                # Poll feeds (no rate limit, poll frequently)
+                if now - last_feed_poll >= config.daemon.feed_interval:
+                    for repo in repos:
+                        feed_events.extend(await fetch_feed_events(
+                            client, repo, state,
+                            releases=config.events.enabled.get("releases", True),
+                            commits=config.events.enabled.get("commits", True),
+                            tags=config.events.enabled.get("tags", True),
+                        ))
+                    last_feed_poll = now
+
+                # Poll API (rate-limited, poll less frequently)
+                if now - last_api_poll >= config.daemon.api_interval:
+                    if not gh_api.rate_low:
+                        for repo in repos:
+                            api_events.extend(
+                                await gh_api.fetch_repo_events(client, repo, state)
+                            )
+                        api_poll_count += 1
+                    else:
+                        wait = gh_api.seconds_until_reset()
+                        log.warning(
+                            "Skipping API poll (rate limit low: %d/%d remaining, resets in %.0fs)",
+                            gh_api.rate_remaining, gh_api.rate_limit, wait,
+                        )
+                    last_api_poll = now
+
+                # Poll notifications (respects X-Poll-Interval from server)
+                notif_interval = max(
+                    config.daemon.notification_interval,
+                    gh_api.poll_interval,
+                )
+                if now - last_notif_poll >= notif_interval:
+                    if not gh_api.rate_low:
+                        notif_events = await gh_api.fetch_notifications(client, state)
+                    last_notif_poll = now
+
+                # Merge, dedup, filter, post
+                events = merge_and_filter(
+                    feed_events, api_events, notif_events, config.events,
+                )
+                if events:
+                    await _post_events(
+                        client, config, masto, renderer, state, events,
+                    )
+                else:
+                    state.touch_poll()
+                    state.save()
 
             except Exception:
                 log.exception("Error in poll cycle")
 
-            # Sleep with shutdown check
+            # Sleep until the next source needs polling
+            sleep_time = _next_sleep(
+                config, gh_api, last_feed_poll, last_api_poll, last_notif_poll,
+            )
             try:
-                await asyncio.wait_for(shutdown.wait(), timeout=config.daemon.poll_interval)
+                await asyncio.wait_for(shutdown.wait(), timeout=sleep_time)
             except asyncio.TimeoutError:
                 pass
 
@@ -83,76 +149,33 @@ async def run(config: AppConfig) -> None:
     log.info("Daemon stopped")
 
 
-async def _discover_repos(
-    client: httpx.AsyncClient,
-    gh_api: GitHubAPI,
-    config: AppConfig,
-) -> list[RepoInfo]:
-    """Get the list of repos to monitor."""
-    if config.github.repos:
-        # User specified explicit repos
-        repos = []
-        for r in config.github.repos:
-            parts = r.split("/", 1)
-            if len(parts) == 2:
-                repos.append(RepoInfo(owner=parts[0], name=parts[1]))
-        log.info("Using %d configured repos", len(repos))
-        return repos
-
-    # Discover all repos via API
-    return await gh_api.discover_repos(client)
-
-
-async def _poll_cycle(
-    client: httpx.AsyncClient,
+def _next_sleep(
     config: AppConfig,
     gh_api: GitHubAPI,
+    last_feed: float,
+    last_api: float,
+    last_notif: float,
+) -> float:
+    """Calculate seconds until the next source needs polling."""
+    now = time.monotonic()
+    notif_interval = max(config.daemon.notification_interval, gh_api.poll_interval)
+    waits = [
+        config.daemon.feed_interval - (now - last_feed),
+        config.daemon.api_interval - (now - last_api),
+        notif_interval - (now - last_notif),
+    ]
+    return max(1.0, min(waits))
+
+
+async def _post_events(
+    client: httpx.AsyncClient,
+    config: AppConfig,
     masto: MastodonPoster,
     renderer: TemplateRenderer,
     state: State,
-    repos: list[RepoInfo],
+    events: list[Event],
 ) -> None:
-    """Run one full poll cycle: fetch → merge → render → post."""
-    all_feed_events = []
-    all_api_events = []
-
-    for repo in repos:
-        # 1. Feed-first: fetch Atom feeds (no auth, lightweight)
-        feed_events = await fetch_feed_events(
-            client, repo, state,
-            releases=config.events.enabled.get("releases", True),
-            commits=config.events.enabled.get("commits", True),
-            tags=config.events.enabled.get("tags", True),
-        )
-        all_feed_events.extend(feed_events)
-
-        # 2. API fallback: fetch events for types feeds can't cover
-        if not gh_api.rate_low:
-            api_events = await gh_api.fetch_repo_events(client, repo, state)
-            all_api_events.extend(api_events)
-        else:
-            log.warning("Skipping API events for %s (rate limit low)", repo.full_name)
-
-    # 3. Notifications (global, not per-repo)
-    notification_events = []
-    if not gh_api.rate_low:
-        notification_events = await gh_api.fetch_notifications(client, state)
-
-    # 4. Merge, deduplicate, filter
-    events = merge_and_filter(
-        all_feed_events,
-        all_api_events,
-        notification_events,
-        config.events,
-    )
-
-    if not events:
-        log.debug("No new events to post")
-        state.touch_poll()
-        state.save()
-        return
-
-    # 5. Render and post each event
+    """Render and post events to Mastodon."""
     posted = 0
     for event in events:
         text = renderer.render(event)
@@ -180,7 +203,6 @@ async def _poll_cycle(
             if success:
                 state.record_event(event.event_id)
                 posted += 1
-                # Throttle to avoid flooding
                 if posted < len(events):
                     await asyncio.sleep(_POST_THROTTLE)
             else:
@@ -189,6 +211,26 @@ async def _poll_cycle(
     log.info("Posted %d/%d events", posted, len(events))
     state.touch_poll()
     state.save()
+
+
+async def _discover_repos(
+    client: httpx.AsyncClient,
+    gh_api: GitHubAPI,
+    config: AppConfig,
+) -> list[RepoInfo]:
+    """Get the list of repos to monitor."""
+    if config.github.repos:
+        # User specified explicit repos
+        repos = []
+        for r in config.github.repos:
+            parts = r.split("/", 1)
+            if len(parts) == 2:
+                repos.append(RepoInfo(owner=parts[0], name=parts[1]))
+        log.info("Using %d configured repos", len(repos))
+        return repos
+
+    # Discover all repos via API
+    return await gh_api.discover_repos(client)
 
 
 def _event_type_to_config_key(event_type) -> str:

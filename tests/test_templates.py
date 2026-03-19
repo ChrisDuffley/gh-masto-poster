@@ -27,7 +27,7 @@ def test_default_release_template() -> None:
         body="Bug fixes and improvements",
     )
     text = renderer.render(event)
-    assert "🚀" in text
+    assert "New release" in text
     assert "v1.0" in text
     assert "alice/myrepo" in text
     assert "https://github.com/alice/myrepo/releases/tag/v1.0" in text
@@ -53,7 +53,7 @@ def test_push_template() -> None:
         commit_messages=["fix bug", "add feature", "update docs"],
     )
     text = renderer.render(event)
-    assert "📝" in text
+    assert "commit" in text
     assert "3" in text
     assert "main" in text
 
@@ -78,7 +78,7 @@ def test_issue_template() -> None:
         url="https://github.com/alice/myrepo/issues/42",
     )
     text = renderer.render(event)
-    assert "📋" in text
+    assert "Issue" in text
     assert "opened" in text
     assert "Bug in login" in text
 
@@ -91,5 +91,5 @@ def test_star_template() -> None:
         title="bob starred alice/myrepo",
     )
     text = renderer.render(event)
-    assert "⭐" in text
+    assert "starred" in text
     assert "bob" in text

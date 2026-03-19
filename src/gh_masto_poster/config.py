@@ -46,7 +46,9 @@ class MastodonConfig:
 
 @dataclass
 class DaemonConfig:
-    poll_interval: int = 120
+    feed_interval: float = 60.0
+    api_interval: float = 300.0
+    notification_interval: float = 60.0
     state_file: str = "state.json"
     log_level: str = "INFO"
     dry_run: bool = False
@@ -121,7 +123,9 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("Mastodon instance_url required in [mastodon] config")
 
     daemon = DaemonConfig(
-        poll_interval=int(_get("daemon", "poll_interval") or "120"),
+        feed_interval=float(_get("daemon", "feed_interval") or "60"),
+        api_interval=float(_get("daemon", "api_interval") or "300"),
+        notification_interval=float(_get("daemon", "notification_interval") or "60"),
         state_file=_get("daemon", "state_file") or "state.json",
         log_level=_get("daemon", "log_level") or "INFO",
     )

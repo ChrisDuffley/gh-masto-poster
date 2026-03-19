@@ -1,5 +1,6 @@
 """Tests for the GitHub API client."""
 
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -123,3 +124,14 @@ async def test_rate_low() -> None:
 
     api.rate_remaining = 600
     assert not api.rate_low  # 600/5000 = 12% > 10%
+
+
+@pytest.mark.asyncio
+async def test_seconds_until_reset() -> None:
+    api = GitHubAPI("fake_token")
+    api.rate_reset = int(time.time()) + 120
+    secs = api.seconds_until_reset()
+    assert 118 <= secs <= 121
+
+    api.rate_reset = 0
+    assert api.seconds_until_reset() == 0.0

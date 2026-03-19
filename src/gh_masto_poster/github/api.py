@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -82,6 +84,60 @@ class GitHubAPI:
         """True if less than 10% of rate limit remains."""
         return self.rate_remaining < self.rate_limit * 0.1
 
+    def seconds_until_reset(self) -> float:
+        """Seconds until the rate limit window resets."""
+        if self.rate_reset <= 0:
+            return 0.0
+        return max(0.0, self.rate_reset - time.time())
+
+    async def _request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str | int] | None = None,
+    ) -> httpx.Response:
+        """Make an API request with rate-limit backoff on 403/429."""
+        hdrs = headers or self._headers()
+        for attempt in range(3):
+            resp = await client.request(method, url, headers=hdrs, params=params)
+            self._update_rate_info(resp)
+
+            if resp.status_code == 429 or (
+                resp.status_code == 403 and self.rate_remaining == 0
+            ):
+                # Primary rate limit: wait until reset
+                retry_after = resp.headers.get("retry-after")
+                if retry_after:
+                    wait = float(retry_after)
+                elif self.rate_reset > 0:
+                    wait = self.seconds_until_reset() + 1
+                else:
+                    wait = 60 * (2 ** attempt)
+                log.warning(
+                    "GitHub rate limited (%d), waiting %.0fs (attempt %d/3)",
+                    resp.status_code, wait, attempt + 1,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            if resp.status_code == 403:
+                # Secondary rate limit (no remaining=0): exponential backoff
+                retry_after = resp.headers.get("retry-after")
+                wait = float(retry_after) if retry_after else 60 * (2 ** attempt)
+                log.warning(
+                    "GitHub secondary rate limit (403), waiting %.0fs (attempt %d/3)",
+                    wait, attempt + 1,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            return resp
+
+        return resp  # return last response even if still rate-limited
+
     # ── Repo discovery ──────────────────────────────────────────
 
     async def discover_repos(self, client: httpx.AsyncClient) -> list[RepoInfo]:
@@ -89,9 +145,9 @@ class GitHubAPI:
         repos: list[RepoInfo] = []
         page = 1
         while True:
-            resp = await client.get(
+            resp = await self._request(
+                client, "GET",
                 f"{_API_BASE}/user/repos",
-                headers=self._headers(),
                 params={"per_page": 100, "page": page, "sort": "updated"},
             )
             self._update_rate_info(resp)
@@ -132,8 +188,9 @@ class GitHubAPI:
         if etag:
             headers["If-None-Match"] = etag
 
-        resp = await client.get(url, headers=headers, params={"per_page": 100})
-        self._update_rate_info(resp)
+        resp = await self._request(
+            client, "GET", url, headers=headers, params={"per_page": 100},
+        )
 
         if resp.status_code == 304:
             log.debug("No new repo events (304): %s", repo.full_name)
@@ -175,8 +232,9 @@ class GitHubAPI:
         if etag:
             headers["If-None-Match"] = etag
 
-        resp = await client.get(url, headers=headers, params={"all": "false"})
-        self._update_rate_info(resp)
+        resp = await self._request(
+            client, "GET", url, headers=headers, params={"all": "false"},
+        )
 
         if resp.status_code == 304:
             log.debug("No new notifications (304)")
