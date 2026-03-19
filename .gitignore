@@ -1,0 +1,30 @@
+# Config with secrets
+config.ini
+
+# State file
+state.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Copilot memory/session files
+.github/copilot-*
+.copilot/
