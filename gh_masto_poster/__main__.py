@@ -37,10 +37,6 @@ async def run(config: AppConfig) -> None:
         config.mastodon.access_token,
         config.mastodon.default_visibility,
     )
-    renderer = TemplateRenderer(
-        custom_templates=config.events.templates,
-        character_limit=config.mastodon.character_limit,
-    )
 
     shutdown = asyncio.Event()
 
@@ -53,13 +49,12 @@ async def run(config: AppConfig) -> None:
         loop.add_signal_handler(sig, _signal_handler)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        # Auto-detect Mastodon character limit
+        # Auto-detect Mastodon character limit from the instance
         char_limit = await masto.detect_character_limit(client)
-        if char_limit != config.mastodon.character_limit:
-            renderer = TemplateRenderer(
-                custom_templates=config.events.templates,
-                character_limit=char_limit,
-            )
+        renderer = TemplateRenderer(
+            custom_templates=config.events.templates,
+            character_limit=char_limit,
+        )
 
         repos: list[RepoInfo] = []
         poll_count = 0

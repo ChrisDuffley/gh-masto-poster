@@ -28,7 +28,6 @@ repos = owner/repo1, owner/repo2
 instance_url = https://mastodon.example/
 access_token = masto_full
 default_visibility = unlisted
-character_limit = 1000
 
 [daemon]
 poll_interval = 60
@@ -78,7 +77,6 @@ def test_full_config(tmp_path: Path) -> None:
     config = load_config(cfg_path)
     assert config.github.repos == ["owner/repo1", "owner/repo2"]
     assert config.mastodon.instance_url == "https://mastodon.example"  # trailing slash stripped
-    assert config.mastodon.character_limit == 1000
     assert config.daemon.poll_interval == 60
     assert config.daemon.state_file == "custom_state.json"
     assert config.events.enabled["commits"] is False

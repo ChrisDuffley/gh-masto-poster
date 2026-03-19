@@ -42,7 +42,6 @@ class MastodonConfig:
     instance_url: str
     access_token: str
     default_visibility: str = "public"
-    character_limit: int = 500
 
 
 @dataclass
@@ -116,7 +115,6 @@ def load_config(path: str | Path) -> AppConfig:
         instance_url=_get("mastodon", "instance_url").rstrip("/"),
         access_token=masto_token,
         default_visibility=_get("mastodon", "default_visibility") or "public",
-        character_limit=int(_get("mastodon", "character_limit") or "500"),
     )
 
     if not mastodon.instance_url:
