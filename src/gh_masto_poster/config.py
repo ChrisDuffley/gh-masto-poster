@@ -35,6 +35,8 @@ class GitHubConfig:
     token: str
     username: str
     repos: list[str] = field(default_factory=list)  # empty = discover all
+    user_feed: bool = True  # monitor user's own activity
+    repo_feeds: bool = True  # monitor per-repo feeds
 
 
 @dataclass
@@ -107,10 +109,16 @@ def load_config(path: str | Path) -> AppConfig:
     if not masto_token:
         raise ValueError("Mastodon token required: set access_token under [mastodon] in config or MASTODON_TOKEN env var")
 
+    # Parse user_feed / repo_feeds booleans
+    user_feed_val = _get("github", "user_feed")
+    repo_feeds_val = _get("github", "repo_feeds")
+
     github = GitHubConfig(
         token=gh_token,
         username=_get("github", "username"),
         repos=_parse_list(_get("github", "repos")),
+        user_feed=_parse_bool(user_feed_val) if user_feed_val else True,
+        repo_feeds=_parse_bool(repo_feeds_val) if repo_feeds_val else True,
     )
 
     mastodon = MastodonConfig(

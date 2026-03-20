@@ -23,6 +23,8 @@ _FULL_CONFIG = """\
 token = ghp_full
 username = fulluser
 repos = owner/repo1, owner/repo2
+user_feed = true
+repo_feeds = false
 
 [mastodon]
 instance_url = https://mastodon.example/
@@ -72,6 +74,9 @@ def test_minimal_config(tmp_path: Path) -> None:
     assert config.events.enabled["stars"] is False
     assert config.events.enabled["ci"] is False
     assert config.events.enabled["invitations"] is False
+    # user_feed and repo_feeds default to True
+    assert config.github.user_feed is True
+    assert config.github.repo_feeds is True
 
 
 def test_full_config(tmp_path: Path) -> None:
@@ -80,6 +85,8 @@ def test_full_config(tmp_path: Path) -> None:
 
     config = load_config(cfg_path)
     assert config.github.repos == ["owner/repo1", "owner/repo2"]
+    assert config.github.user_feed is True
+    assert config.github.repo_feeds is False
     assert config.mastodon.instance_url == "https://mastodon.example"  # trailing slash stripped
     assert config.daemon.feed_interval == 30.0
     assert config.daemon.api_interval == 600.0

@@ -216,6 +216,51 @@ class GitHubAPI:
         log.info("Repo events %s: %d new", repo.full_name, len(events))
         return events
 
+    # ── User events ─────────────────────────────────────────────
+
+    async def fetch_user_events(
+        self,
+        client: httpx.AsyncClient,
+        username: str,
+        state: State,
+    ) -> list[Event]:
+        """Fetch events for a user via /users/{username}/events."""
+        endpoint = f"/users/{username}/events"
+        url = f"{_API_BASE}{endpoint}"
+
+        headers = self._headers()
+        etag = state.get_api_etag(endpoint)
+        if etag:
+            headers["If-None-Match"] = etag
+
+        resp = await self._request(
+            client, "GET", url, headers=headers, params={"per_page": 100},
+        )
+
+        if resp.status_code == 304:
+            log.debug("No new user events (304): %s", username)
+            return []
+
+        if resp.status_code != 200:
+            log.warning("User events fetch failed (%d): %s", resp.status_code, username)
+            return []
+
+        new_etag = resp.headers.get("etag")
+        if new_etag:
+            state.set_api_etag(endpoint, new_etag)
+
+        events: list[Event] = []
+        for raw in resp.json():
+            gh_id = raw.get("id", "")
+            if state.has_event(gh_id):
+                continue
+            event = _api_event_to_event(raw, gh_id)
+            if event:
+                events.append(event)
+
+        log.info("User events %s: %d new", username, len(events))
+        return events
+
     # ── Notifications ───────────────────────────────────────────
 
     async def fetch_notifications(

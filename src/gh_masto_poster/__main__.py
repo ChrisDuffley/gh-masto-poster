@@ -14,7 +14,7 @@ import httpx
 from gh_masto_poster.config import AppConfig, load_config
 from gh_masto_poster.github.api import GitHubAPI
 from gh_masto_poster.github.events import merge_and_filter
-from gh_masto_poster.github.feeds import fetch_feed_events
+from gh_masto_poster.github.feeds import fetch_feed_events, fetch_user_feed_events
 from gh_masto_poster.mastodon.poster import MastodonPoster
 from gh_masto_poster.models import Event, RepoInfo
 from gh_masto_poster.state import State
@@ -66,18 +66,22 @@ async def run(config: AppConfig) -> None:
         last_notif_poll = 0.0
 
         log.info(
-            "Starting gh-masto-poster daemon (feeds: %.0fs, API: %.0fs, notifications: %.0fs)",
+            "Starting gh-masto-poster daemon (feeds: %.0fs, API: %.0fs, notifications: %.0fs, user_feed: %s, repo_feeds: %s)",
             config.daemon.feed_interval,
             config.daemon.api_interval,
             config.daemon.notification_interval,
+            config.github.user_feed,
+            config.github.repo_feeds,
         )
 
         while not shutdown.is_set():
             try:
                 now = time.monotonic()
 
-                # Refresh repo list periodically
-                if not repos or api_poll_count % _REPO_REFRESH_INTERVAL == 0:
+                # Refresh repo list periodically (only needed for repo feeds/events)
+                if config.github.repo_feeds and (
+                    not repos or api_poll_count % _REPO_REFRESH_INTERVAL == 0
+                ):
                     repos = await _discover_repos(client, gh_api, config)
 
                 feed_events: list[Event] = []
@@ -86,22 +90,40 @@ async def run(config: AppConfig) -> None:
 
                 # Poll feeds (no rate limit, poll frequently)
                 if now - last_feed_poll >= config.daemon.feed_interval:
-                    for repo in repos:
-                        feed_events.extend(await fetch_feed_events(
-                            client, repo, state,
-                            releases=config.events.enabled.get("releases", True),
-                            commits=config.events.enabled.get("commits", True),
-                            tags=config.events.enabled.get("tags", True),
-                        ))
+                    # User activity feed
+                    if config.github.user_feed and config.github.username:
+                        feed_events.extend(
+                            await fetch_user_feed_events(
+                                client, config.github.username, state,
+                            )
+                        )
+                    # Per-repo feeds
+                    if config.github.repo_feeds:
+                        for repo in repos:
+                            feed_events.extend(await fetch_feed_events(
+                                client, repo, state,
+                                releases=config.events.enabled.get("releases", True),
+                                commits=config.events.enabled.get("commits", True),
+                                tags=config.events.enabled.get("tags", True),
+                            ))
                     last_feed_poll = now
 
                 # Poll API (rate-limited, poll less frequently)
                 if now - last_api_poll >= config.daemon.api_interval:
                     if not gh_api.rate_low:
-                        for repo in repos:
+                        # User events API
+                        if config.github.user_feed and config.github.username:
                             api_events.extend(
-                                await gh_api.fetch_repo_events(client, repo, state)
+                                await gh_api.fetch_user_events(
+                                    client, config.github.username, state,
+                                )
                             )
+                        # Per-repo events API
+                        if config.github.repo_feeds:
+                            for repo in repos:
+                                api_events.extend(
+                                    await gh_api.fetch_repo_events(client, repo, state)
+                                )
                         api_poll_count += 1
                     else:
                         wait = gh_api.seconds_until_reset()
